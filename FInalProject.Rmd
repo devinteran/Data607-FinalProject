@@ -1,0 +1,812 @@
+---
+title: "Final Project"
+author: "Devin Teran, Gabe Abreu, Amit Kapoor, Subhalaxmi Rout"
+date: "4/27/2020"
+output: rmdformats::readthedown
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+# Research Objective
+Trump’s presidency is unique from other presidents in the manner he communicates public and economic policy via social media. We want to examine whether his remarks during this global pandemic (Mid March through April 2020) have tangible effects on the stock market.  We’re going to analyze the text from daily White House briefings using sentiment analysis. Compare and contrast the sentiment analysis with the stock market performance during his presidency and Trump's approval ratings.
+
+## Data Sources:   
+* White House Briefings - each weekday President Trump addresses the nation and those scripts can be found on [https://www.whitehouse.gov/briefings-statements](https://www.whitehouse.gov/briefings-statements)
+* Stock Market Data - this data was extracted using the **quantmod** to obtain small, mid and large Cap funds
+* Trump Approval Ratings - this shows daily approval ratings from [FiveThirtyEight](https://projects.fivethirtyeight.com/trump-approval-ratings/)
+* Twitter API (https://dev.twitter.com/apps)
+
+## Necessary R Packages:
+The following libraries are used throughout our analysis:
+
+* **twitteR**
+* **quantmod** 
+* **rvest** 
+* **stringr**
+* **purr** 
+* **tidytext**
+* **dplyr**
+* **tidyr**
+* **ggplot2**
+* **lubridate**
+* **RCurl**
+
+```{r message=FALSE, include = FALSE, warning=FALSE}
+library(twitteR)
+library(quantmod)
+library(rvest)
+library(stringr)
+library(purrr)
+library(tidytext)
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(lubridate)
+library(RCurl)
+library(egg)
+```
+
+# Gather Data  
+## Daily Presidential White House Briefings
+These URLs all end in a number so we're going to first create a list of URLs & use **read_html** to grab the **< p > tags** for each page  
+```{r gather_wh_briefing_urls}
+base_url <- 'https://www.whitehouse.gov/briefings-statements/remarks-president-trump-vice-president-pence-members-coronavirus-task-force-press-briefing-'
+
+getPageURLs <- function(url) {
+   add_number <- seq(2,33)
+   urls <- str_c(base_url, add_number)
+   return(urls)
+}
+
+urls <- getPageURLs(urls)
+head(urls)
+```
+
+```{r gather-wh-data}
+wh_briefings <- purrr::map(urls, ~read_html(.x) %>% html_nodes("p") %>% html_text())
+wh_dates <- purrr::map(urls, ~read_html(.x) %>% html_nodes("p") %>% html_node("time") %>% html_text())
+
+```
+
+## Stock Market Data
+We decided it would be best to compare smallCapFunds, midCapFunds, and largeCapFunds.
+```{r gather-stock-market-data,warnings=FALSE,messages=FALSE}
+start<- as.Date("2020-03-15")
+end <- as.Date("2020-04-30")
+
+
+#Retrieving information on Top 5 Small Growth Funds as ranked by "U.S. News"
+smallCapFunds <- c("PSGAX", "FKASX", "PGSGX", "QUASX", "TRSSX")
+getSymbols(smallCapFunds, src = "yahoo", from = start, to = end)
+
+#Retreiving information on Top 5 Mid Growth Funds as ranked by "U.S. News"
+midCapFunds <- c("DFDMX", "CCSMX","PRDMX", "OTCAX", "BMGAX")
+getSymbols(midCapFunds, src = "yahoo", from = start, to = end)
+
+#Retrieving information on Top 5 Large Growth Funds as ranked by "U.s News"
+largeCapFunds <- c("TRLGX", "PREFX", "TPLGX", "FDSVX", "PBLAX")
+getSymbols(largeCapFunds, src = "yahoo", from = start, to = end)
+
+
+#Retrieve Dow Jones Industrial Average
+getSymbols("DJIA", src = "yahoo", from = start, to = end)
+
+# glimpse data
+dplyr::glimpse(PSGAX)
+```
+
+## [Trump Approval Ratings](https://projects.fivethirtyeight.com/trump-approval-ratings/)
+
+These ratings were available on FiveThiryEight broken out by Votes,Adults, and All Polls for each day during April 2020.
+
+```{r gather-trump-appr, echo=TRUE, warning=FALSE}
+
+#github URL
+theURL <- getURL("https://raw.githubusercontent.com/geeman1209/MSDATA2020/master/DATA607/Final_Project/approval_topline.csv")
+# Read csv from github
+trump_apprdf <- read.csv(text = theURL,stringsAsFactors = FALSE)
+# glimpse data
+dplyr::glimpse(trump_apprdf)
+
+```
+
+
+# Cleaning Data 
+
+## Clean WH Briefing Data
+
+In order to easily analyze the WH briefings, we needed to include a date in the format 'yyyy-mm-dd' in addition to our number page number, i.  The page number correlates with the last character of the page URL.
+
+```{r clean-wh-briefing-dates}
+
+#create empty dataframe
+testFrame <- data.frame(date = character(),
+                        stringsAsFactors = FALSE)
+
+for (i in 1:length(wh_dates)){
+  testFrame <- rbind(testFrame,cbind(as.data.frame(unlist(wh_dates[[i]]),stringsAsFactors = FALSE),i))
+}
+
+dateFrame <- na.omit(testFrame)
+
+```
+
+```{r list-to-dataframe}
+data0 <- data.frame(text=character(),
+                   Day=integer(),
+                 stringsAsFactors=FALSE)
+
+for (i in 1:length(wh_briefings)){
+  data0 <- rbind(data0,cbind(as.data.frame(unlist(wh_briefings[[i]]),stringsAsFactors = FALSE),i))
+}
+
+colnames(data0) <- c('text','day')
+```
+
+```{r}
+
+correctMatch <- inner_join(dateFrame,data0,by= c("i" = "day"))
+colnames(correctMatch) <- c('date', 'day', 'text')
+
+wh_data <- correctMatch
+
+```
+
+```{r clean-data}
+tidy_data <- wh_data %>%
+  mutate(linenumber = row_number()) %>%
+  ungroup() %>%
+  unnest_tokens(word, text)
+
+head(tidy_data)
+```
+
+## Clean Approval Ratings
+
+To analyze the approval ratings, we needed to convert the modeldate into the date format 'yyyy-mm-dd' alongwith filterring the data for the month of April, 2020.
+
+```{r date, echo=TRUE, warning=FALSE}
+
+# modeldate - convert into date
+trump_apprdf$modeldate <- mdy(trump_apprdf$modeldate)
+dplyr::glimpse(trump_apprdf)
+```
+
+```{r filter-apr, echo=TRUE, warning=FALSE}
+
+# filter data for April, 2020
+trump_apprsubdf <- trump_apprdf %>% 
+  filter(modeldate >= as.Date("2020-04-01"))
+```
+
+# Data Analysis
+## White House Briefing & Sentiment Analysis
+
+```{r create-stop-word-list,include=FALSE}
+custom_stop_words <- bind_rows(tibble(word = c("EDT"), 
+                                      lexicon = c("custom")), 
+                               stop_words)
+
+custom_stop_words
+```
+
+
+The tidytext package contains three sentiment lexicons. Three general-purpose lexicons are affin, bing and nrc which are based on unigrams, i.e., single words.
+
+* AFINN from Finn Arup Nielsen assigns scores to words for positive/negative sentiments.
+* bing from Bing Liu and collaborators categorizes words in a binary fashion into positive and negative categories.
+* nrc from Saif Mohammad and Peter Turney categorizes words in a binary fashion (“yes”/“no”) into categories of positive, negative, anger, anticipation, disgust, fear, joy, sadness, surprise, and trust.
+
+```{r apply lexicon analysis,include=FALSE,include=FALSE}
+afinn <- get_sentiments("afinn") 
+
+tidy_data %>%
+  anti_join(stop_words) %>%
+  group_by(day) %>%
+  inner_join(afinn) %>%
+  count(word, sort = TRUE) %>%
+  arrange(day,-n)
+```
+
+```{r affin, echo=TRUE, warning=FALSE,include=TRUE}
+# Using lexicon affin
+affinLex <- get_sentiments("afinn")
+wh.affin <- tidy_data %>% 
+  anti_join(stop_words) %>% 
+  group_by(day) %>%
+  inner_join(affinLex) %>% 
+  summarise(sentiment = sum(value)) %>% 
+  mutate(method="affin")
+
+wh.affin
+```
+
+```{r affin-bar, echo=TRUE, warning=FALSE,include=TRUE}
+
+# bar plot for positive and negative cumulative score
+wh.affin %>% 
+  summarise(Positive = sum(sentiment[sentiment>0]), Negative = sum(sentiment[sentiment<0])) %>% 
+  gather(variable, value, Positive:Negative) %>% 
+  ggplot(aes(variable, value,  fill = variable)) +
+  geom_bar(stat="identity") +  
+  geom_text(aes(label=value), position=position_dodge(width=0.9), vjust=-0.25)
+```
+
+
+
+
+```{r bing, echo=TRUE, warning=FALSE,include=TRUE}
+
+# Using lexicon bing 
+
+bingLex <- get_sentiments("bing")
+wh.bing <- tidy_data %>% 
+  anti_join(stop_words) %>% 
+  group_by(day) %>%
+  inner_join(bingLex) %>% 
+  count(day, sentiment) %>% 
+  spread(sentiment, n, fill=0) %>% 
+  mutate(sentiment = positive - negative) %>%
+  mutate(method="bing")
+
+wh.bing
+```
+
+  
+
+
+  
+```{r bing-bar, echo=TRUE, warning=FALSE,include=TRUE}
+
+# bar plot for positive and negative sentiments
+wh.bing %>% 
+  ungroup() %>%
+  select(-day) %>% 
+  select(negative, positive) %>% 
+  summarise_all(funs(sum)) %>% 
+  gather(variable, value, negative:positive) %>% 
+  ggplot(aes(variable, value,  fill = variable)) +
+  geom_bar(stat="identity") +  
+  geom_text(aes(label=value), position=position_dodge(width=0.9), vjust=-0.25)
+
+```
+
+
+
+
+```{r nrc, echo=TRUE, warning=FALSE,include=TRUE}
+
+# Using lexicon nrc
+
+nrcLex <- get_sentiments("nrc")
+wh.nrc <- tidy_data %>% 
+  anti_join(stop_words) %>% 
+  group_by(day) %>%
+  inner_join(nrcLex) %>% 
+  filter(sentiment %in% c("positive", "negative")) %>%
+  count(day, sentiment) %>% 
+  spread(sentiment, n, fill=0) %>% 
+  mutate(sentiment = positive - negative) %>%
+  mutate(method="nrc")
+
+wh.nrc
+```
+
+
+```{r nrc-bar, echo=TRUE, warning=FALSE}
+# bar graph for all categories in nrc lexicon
+tidy_data %>% 
+  anti_join(stop_words) %>% 
+  group_by(day) %>%
+  inner_join(nrcLex) %>% 
+  #filter(sentiment %in% c("positive", "negative")) %>%
+  count(day, sentiment) %>% 
+  spread(sentiment, n, fill=0) %>% 
+  ungroup() %>%
+  select(-day) %>% 
+  summarise_all(funs(sum)) %>% 
+  gather(variable, value, anger:trust) %>% 
+  ggplot(aes(variable, value,  fill = variable)) +
+  geom_bar(stat="identity") +  
+  geom_text(aes(label=value), position=position_dodge(width=0.9), vjust=-0.25)
+
+```
+
+### Comparing Lexicons
+
+Following graphs show Sentiment score assigned by each lexicon to individual words in all documents in the corpus.
+
+```{r plot-all-lex, echo=TRUE, warning=FALSE}
+
+# Comparing all 3 lexicons
+
+wh.aff_bin_nrc <- bind_rows(wh.affin, wh.bing, wh.nrc)
+bind_rows(wh.aff_bin_nrc) %>%
+  ggplot(aes(day, sentiment, fill = method)) +
+  geom_col(show.legend = FALSE) +
+  facet_wrap(~method, ncol = 1, scales = "free_y")
+```
+
+
+
+```{r compare-all-lex, echo=TRUE, warning=FALSE,include=TRUE}
+
+# comparing the cumulative sentiments for all 3 lexicons
+wh.aff_bin_nrc %>% 
+  group_by(method) %>% 
+  summarise(sentiment = sum(sentiment)) %>% 
+  ggplot(aes(method, sentiment, fill = method)) +
+  geom_bar(stat="identity") +  
+  geom_text(aes(label=sentiment), position=position_dodge(width=0.9), vjust=-0.25)
+```
+
+
+
+```{r plot-line-all, echo=TRUE, warning=FALSE,include=TRUE}
+
+# line graph for all 3 lexicons
+wh.aff_bin_nrc %>% 
+  ggplot(aes(x=day, y=sentiment, group=method, color=method)) + 
+  geom_line(size=1) + 
+  geom_point() + labs(x="day", y="sentiment", title = "Sentiment vs Days for all 3 lexicons") + 
+  scale_color_manual(values=c("red", "green", "blue")) +
+  theme(plot.title = element_text(hjust = 0.5))
+```
+
+
+The following two graphs are for nrc sentiment where former shows positive, trust and later shows rest of the sentiments.
+
+* There are peaks in words of trust and positive on April 3rd, April 7th and April 14th
+* There are peaks in words of fear on April 1st and April 10th
+
+```{r daily-nrc-sentiment-plot-1, echo=TRUE, warning=FALSE,messages=FALSE}
+a <- tidy_data %>% 
+  anti_join(stop_words) %>% 
+  inner_join(nrcLex) %>% 
+  count(day, sentiment) %>% 
+  spread(sentiment, n, fill=0) %>% 
+  gather(variable, value, c('positive','trust')) %>% 
+  ggplot(aes(day, value,  color = variable,fill = variable)) +
+  geom_line(stat="identity") +
+  ylab('Sentiment') 
+
+b <- tidy_data %>% 
+  anti_join(stop_words) %>% 
+  inner_join(nrcLex) %>% 
+  count(day, sentiment) %>% 
+  spread(sentiment, n, fill=0) %>% 
+  gather(variable, value, c('anger','anticipation','disgust','fear','joy','negative','sadness','surprise')) %>% 
+  ggplot(aes(day, value,  color = variable,fill = variable)) +
+  geom_line(stat="identity") +
+  ylab('Sentiment') 
+
+ggarrange(a, b, ncol=1,top = "White House Briefings - Daily Sentiment by Categories Using NRC")
+
+```
+
+
+## Trump approval ratings analysis
+
+Below two graphs show Trump approval and disapproval ratings for the period of April, 2020. The 3 subgroups included in this analysis are Adults, All polls and Voters. Seeing the graphs, approval estimates shows decline while disapproval estimates increases for all 3 categories.
+
+
+```{r approval-and-disapproval-line, echo=TRUE, warning=FALSE}
+# Disapproval line plot for all 3 sub groups  
+disapprove <- trump_apprsubdf %>% 
+  ggplot(aes(x=modeldate,y=disapprove_estimate, group=subgroup, color=subgroup)) + 
+  geom_line(size=1) + 
+  geom_point() + labs(x="Date", y="Disapproval estimates", title = "") + 
+  scale_color_manual(values=c("red", "green", "blue")) +
+  ggtitle('Trump disapproval estimates for April 2020')+
+  theme(plot.title = element_text(hjust = 0.5))
+
+# Approval line plot for all 3 sub groups  
+approve <- trump_apprsubdf %>% 
+  ggplot(aes(x=modeldate,y=approve_estimate, group=subgroup, color=subgroup)) + 
+  geom_line(size=1) + 
+  geom_point() + labs(x="Date", y="Approval estimates", title = "") + 
+  scale_color_manual(values=c("red", "green", "blue")) +
+  ggtitle('Trump approval estimates for April 2020')+
+  theme(plot.title = element_text(hjust = 0.5))
+
+ggarrange(approve, disapprove, ncol=1)
+
+```
+
+## Stock Market Performance
+
+We used the U.S. News Report top 5 small, mid, and large growth funds to reflect performance small business america vs mid sized businesses vs big business. It was difficult to pick something that would compare the health of "mom and pop" shops, which are a sizable number of businesses. 
+
+A data frame was created that included all the closing prices along with the bing sentiment. The average closing price was calculated and compared against the sentiment over the designated time frame.
+
+A the corr function and lm function were used to calculate any p and corr values between the average closing price and sentiment variables. 
+
+### Small Growth Funds & White House Sentiment Analysis
+```{r}
+smFrame <- dateFrame
+colnames(smFrame) <- c("Date","Day")
+
+smFrame$PSGAX_Close <- PSGAX$PSGAX.Close
+smFrame$FKASX_Close <- FKASX$FKASX.Close 
+smFrame$PGSGX_Close <- PGSGX$PGSGX.Close
+smFrame$QUASX_Close <- QUASX$QUASX.Close
+smFrame$TRSSX_Close <- TRSSX$TRSSX.Close
+
+
+smFrame$Sentiment <- wh.bing$sentiment
+
+```
+
+```{r}
+tstFrame <- smFrame
+
+tstFrame$AvgClose <- (smFrame$PSGAX_Close + smFrame$FKASX_Close + smFrame$PGSGX_Close + smFrame$TRSSX_Close + smFrame$QUASX_Close)/5
+
+SmLm2 <- lm(AvgClose ~ Sentiment, data= tstFrame)
+
+summary(SmLm2)
+cor(tstFrame[8:9])
+
+plot1 <- tstFrame %>% 
+ggplot(aes(x=Day, y=AvgClose, group=1)) +
+    geom_line() +
+    geom_point() + labs(x=" Days", y="Closing Price", title = "Avg of Closing Price for Top 5 Small Growth Funds", subtitle = " March 15, 2020 - April 30, 2020")
+
+plot2 <- tstFrame %>% 
+ggplot(aes(x=Day, y=Sentiment, group=1)) +
+    geom_line() +
+    geom_point() + labs(x="Days", y="WH Briefing Sentiment", title = "Bing Sentiment Scores over 32 Days of WH Briefings", subtitle = "March 15, 2020 - April 30, 2020")
+
+grid.arrange(plot1, plot2, nrow = 2)
+```
+
+### Mid Growth Funds & White House Sentiment Analysis
+```{r}
+mdFrame <- dateFrame
+colnames(mdFrame) <- c("Date","Day")
+
+mdFrame$DFDMX_Close <- DFDMX$DFDMX.Close
+mdFrame$CCSMX_Close <- CCSMX$CCSMX.Close 
+mdFrame$PRDMX_Close <- PRDMX$PRDMX.Close
+mdFrame$OTCAX_Close <- OTCAX$OTCAX.Close
+mdFrame$BMGAX_Close <- BMGAX$BMGAX.Close
+
+
+mdFrame$Sentiment <- wh.bing$sentiment
+
+```
+
+```{r}
+tst2Frame <- mdFrame
+
+tst2Frame$AvgClose <- (mdFrame$DFDMX_Close + mdFrame$CCSMX_Close + mdFrame$PRDMX_Close + mdFrame$OTCAX_Close + mdFrame$BMGAX_Close)/5
+
+SmLm3 <- lm(AvgClose ~ Sentiment, data= tst2Frame)
+
+summary(SmLm3)
+cor(tst2Frame[8:9])
+
+
+plot1 <- tst2Frame %>% 
+ggplot(aes(x=Day, y=AvgClose, group=1)) +
+    geom_line() +
+    geom_point() + labs(x=" Days", y="Closing Price", title = "Avg of Closing Price for Top 5 Mid Growth Funds", subtitle = " March 15, 2020 - April 30, 2020")
+
+plot2 <- tst2Frame %>% 
+ggplot(aes(x=Day, y=Sentiment, group=1)) +
+    geom_line() +
+    geom_point() + labs(x="Days", y="WH Briefing Sentiment", title = "Biin Sentiment Scores over 32 Days of WH Briefings", subtitle = "March 15, 2020 - April 30, 2020")
+
+grid.arrange(plot1, plot2, nrow = 2)
+```
+
+### Large Growth Funds & White House Sentiment Analysis
+```{r}
+lgFrame <- dateFrame
+colnames(lgFrame) <- c("Date","Day")
+
+lgFrame$TRLGX_Close <- TRLGX$TRLGX.Close
+lgFrame$PREFX_Close <- PREFX$PREFX.Close 
+lgFrame$TPLGX_Close <- TPLGX$TPLGX.Close
+lgFrame$FDSVX_Close <- FDSVX$FDSVX.Close
+lgFrame$PBLAX_Close <- PBLAX$PBLAX.Close
+
+
+lgFrame$Sentiment <- wh.bing$sentiment
+
+```
+
+```{r}
+tst3Frame <- lgFrame
+
+tst3Frame$AvgClose <- (TRLGX$TRLGX.Close + PREFX$PREFX.Close + TPLGX$TPLGX.Close + FDSVX$FDSVX.Close + PBLAX$PBLAX.Close)/5
+
+SmLm4 <- lm(AvgClose ~ Sentiment, data= tst3Frame)
+
+summary(SmLm4)
+cor(tst3Frame[8:9])
+
+plot1 <- tst3Frame %>% 
+ggplot(aes(x=Day, y=AvgClose, group=1)) +
+    geom_line() +
+    geom_point() + labs(x=" Days", y="Closing Price", title = "Avg of Closing Price for Top 5 Large Growth Funds", subtitle = " March 15, 2020 - April 30, 2020")
+
+plot2 <- tst3Frame %>% 
+ggplot(aes(x=Day, y=Sentiment, group=1)) +
+    geom_line() +
+    geom_point() + labs(x="Days", y="WH Briefing Sentiment", title = "Biin Sentiment Scores over 32 Days of WH Briefings", subtitle = "March 15, 2020 - April 30, 2020")
+
+grid.arrange(plot1, plot2, nrow = 2)
+```
+
+## Twitter API
+
+In this analysis, we use the twitter account of Donald Trump. All Twitter posts collected from Donald Trump’s twitter account `realDonaldTrump` post for corona pandemic. We will request for 10,000 tweets related to #COVID-19 and #realDonaldTrump from March 15 to May 8th in 2020 for analysis.
+
+We use the data science software R with the tidyr,tidytext, dplyr packages to do text analytics and the twitteR package to connect and download data from twitter.
+
+To collect data from twitter, we created one twitter application. This twitter data belongs to `realDonaldTrump` page. 
+Followed the below steps to connect the app and download data from twitter. After getting the data, store the file in a csv file in Git repository and perform the sentiment analysis. 
+
++ Create a twitter account
++ Go to https://dev.twitter.com/apps and log in with twitter credentials
++ Click create a new app 
++ Give name, Description, Website, and Callback URL (I have used http://localhost:1410 for Callback URL)
++ Click on Developer Agreement check box
++ After create app, go to "keys and Access token" 
++ Copy the below keys 
+  * Consumer key (API Key)
+  * Consumer secret (API Secret)
++ Then, click the `create my access token` then copy the below keys
+  * access token
+  * access token secret
+
+Load necessary packages and collect the data from twitter.
+
+```{r message=FALSE, warning=FALSE}
+library(twitteR)
+library(tidyr)
+
+consumer_key <- "Lsk1wfKakbL6rfFC1dcLfpSrb"
+consumer_secret <- "rKywBX5uJ3d13drP8NxgWGxC3TtPraKZiucS58J2OzFW0Rpcci"
+access_token <- "1257449305616650243-J8E4TpO0Fmu6v5KXyY8T9owgSsPI7v"
+access_secret <- "tgCzUd7fXgnSZFrLvmeMBYNJzH3i1hZkDX16PK3APkM3E"
+
+#now lets connect
+setup_twitter_oauth(consumer_key, consumer_secret, access_token, access_secret)
+
+# Collect 10000 tweets
+trump_tweets <- twitteR::searchTwitter("#COVID-19 + @realDonaldTrump", n = 10000,lang = "en", since = "2020-03-15", until = "2020-05-08",retryOnRateLimit = 1e2)
+
+# set to a data frame
+trump_tweets_df = twListToDF(trump_tweets)
+
+# write data in to a csv
+write.csv(trump_tweets_df, file = "trump_tweets.csv")
+
+# read data from Github
+trump_tweets_df <- read.csv("https://raw.githubusercontent.com/geeman1209/MSDATA2020/master/DATA607/Final_Project/trump_tweets.csv", stringsAsFactors = FALSE)
+
+
+# Raw data
+head(trump_tweets_df)
+
+
+# Remove http from statusSource
+trump_tweets_df$statusSource <- gsub("<.*?>", "",trump_tweets_df$statusSource)
+
+# Most favorited tweets
+trump_fav <- trump_tweets_df %>%
+  dplyr::arrange(desc(favoriteCount))
+
+# Top 6 favorited tweets among the extracted 10000 tweets
+head(trump_fav)
+
+# Most retweeted
+trump_retweet <- trump_tweets_df %>%
+  dplyr::arrange(desc(retweetCount)) %>%
+  dplyr::distinct(text, .keep_all = TRUE)
+
+# Top 6 retweeted texts among the extracted 10000 tweets
+head(trump_retweet)
+
+trump_retweet_extracted <- trump_retweet[c(1,12,13,14)]
+
+head(trump_retweet_extracted)
+
+```
+
+Data cleaning and tokenization
+
+We will convert the data set into a corpus and then clean the corpus such as making all character lower case, remove punctuation marks, white spaces, and stop words. 
+
+```{r fig.height=5, fig.width=6, message=FALSE, warning=FALSE}
+library(tm)
+library(textmineR)
+library(RWeka)
+library(wordcloud)
+library(RColorBrewer)
+
+trump_tweets_df_2 <- trump_tweets_df[c(1,2)]
+
+# remove imocation from text
+trump_tweets_df_2$text <- gsub("[^\x01-\x7F]", "", trump_tweets_df_2$text)
+
+
+# Change dataset into a corpus
+trump_tweets_corp <- tm::VCorpus(tm::VectorSource(trump_tweets_df_2))
+
+
+# Data cleaning
+trump_tweets_corp <- tm::tm_map(trump_tweets_corp, tolower)
+trump_tweets_corp <- tm::tm_map(trump_tweets_corp, PlainTextDocument)
+trump_tweets_corp <- tm::tm_map(trump_tweets_corp, removePunctuation)
+
+# Remove stop words
+new_stops <-c("covid","iphone","coronavirus","android","web","rt","chuonlinenews","Fashion", "fashionblogger", "Covid_19", "Juventus", "WuhanVirus","covid19","dranthonyfauci","scotgov youre", "rvawonk two","false","president","realdonaldtrump","champion")
+
+
+trump_tweets_corp <- tm::tm_map(trump_tweets_corp, removeWords, words = c(stopwords("english"), new_stops))
+trump_tweets_corp <- tm::tm_map(trump_tweets_corp, stripWhitespace)
+trump_tweets_corp <- tm::tm_map(trump_tweets_corp, PlainTextDocument)
+trump_tweets_corp <- tm::tm_map(trump_tweets_corp, removePunctuation)
+trump_tweets_corp <- tm::tm_map(trump_tweets_corp, removeNumbers)
+
+
+# Tokenize tweets texts into words
+tokenizer <- function(x) {
+  RWeka::NGramTokenizer(x, RWeka::Weka_control(min = 2, max = 2))
+}
+
+tdm <- TermDocumentMatrix(
+  trump_tweets_corp,
+  control = list(tokenize = tokenizer)
+)
+
+tdm <- as.matrix(tdm)
+trump_tweets_cleaned_freq <- rowSums(tdm)
+
+
+# Create a bi-gram (2-word) word cloud
+pal <- RColorBrewer::brewer.pal(8,"Set1")
+wordcloud::wordcloud(names(trump_tweets_cleaned_freq), trump_tweets_cleaned_freq, min.freq=50,max.words = 50, random.order=TRUE,random.color = TRUE, rot.per=.15, colors = pal,scale = c(3,1))
+```
+
+This word cloud shows the Word frequency of bi-grams(2 words). Based on the bi-gram we can know what most people are taking on Trump's post. 
+
+### Sentiment Analysis 
+
+Sentiment analysis helps us understand peoples’ feelings towards a specific subject. We will break the tweets’ sentences into words for further analysis.
+
+```{r message=FALSE, warning=FALSE}
+library(tibble)
+library(tidytext)
+
+# Transform sentences into words
+trump_data <- trump_tweets_df %>%
+  tidytext::unnest_tokens(output = "words", input = text, token = "words")
+
+# Remove stop words from tibble
+trump_clean_data <- trump_data %>%
+  dplyr::anti_join(stop_words, by=c("words"="word")) %>% dplyr::filter(words != "trump" )
+```
+Polarity scores help us make quantitative judgments about the feelings of some text. In short, we categorize words from the tweets into positive and negative types and give them a score for analysis.
+Then, we filter the dataset to get only words with a polarity score of 80 or more. I assigned the words with sentiment using `bing` lexicon and categorize words using polarity scores.
+
+```{r message=FALSE, warning=FALSE}
+library(tidyr)
+library(ggplot2)
+
+sentiment_data <- trump_clean_data %>% 
+  # Inner join to bing lexicon by term = word
+  dplyr::inner_join(get_sentiments("bing"), by = c("words" = "word")) %>% 
+  # Count by term and sentiment, weighted by count
+  dplyr::count(words, sentiment) %>%
+  # Spread sentiment, using n as values
+  tidyr::spread(sentiment, n, fill = 0) %>%
+  # Mutate to add a polarity column
+  dplyr::mutate(polarity = positive - negative)
+
+# show summary of sentiment data
+summary(sentiment_data)
+
+polarity_data <- sentiment_data %>% 
+  # Filter for absolute polarity at least 80 
+  dplyr::filter(abs(polarity) >= 80) %>% 
+  # add new column named as sentiments, shows positive/negative
+  dplyr::mutate(
+    Sentiments = ifelse(polarity > 0, "positive", "negative")
+  )
+
+
+ggplot2::ggplot(polarity_data, aes(reorder(words, polarity), polarity, fill = Sentiments)) +
+  geom_col() + 
+  ggtitle("Sentiment Word Frequency") + 
+  theme(axis.text.x = element_text(angle = 45, vjust = 0.5, size = 10))+
+  xlab("Word")
+```
+From the frequency of sentiments, we can see, negative sentiments frequency and positive sentiments are equal.
+
+To get a clear picture of how positive and negative words are used, I assigned the words with a sentiment using the ‘bing’ lexicon and do a simple count to generate the top 15 most common positive and negative words used in the extracted tweets.
+
+```{r message=FALSE, warning=FALSE}
+word_counts <- trump_clean_data %>%
+  #  sentiment analysis using the "bing" lexicon
+  dplyr::inner_join(get_sentiments("bing"), by = c("words" = "word")) %>%
+  # Count by word and sentiment
+  dplyr::count(words, sentiment)
+
+
+top_words <- word_counts %>%
+  # Group by sentiment
+ dplyr:: group_by(sentiment) %>%
+  # Take the top 15 for each sentiment
+  dplyr::top_n(15) %>%
+  dplyr::ungroup() %>%
+  # Make word a factor in order of n
+  dplyr::mutate(words = reorder(words, n))
+
+
+
+ggplot2::ggplot(top_words, aes(words, n, fill = sentiment)) +
+  geom_col(show.legend = FALSE) +
+  geom_text(aes(label = n, hjust=1), size = 3.5, color = "black") +
+  facet_wrap(~sentiment, scales = "free") +  
+  coord_flip() +
+  ggtitle("Most common positive and negative words")
+
+
+# Sentiment word cloud
+tokenizer <- function(x) {
+  RWeka::NGramTokenizer(x, RWeka::Weka_control(min = 1, max = 1))
+}
+
+tdm <- TermDocumentMatrix(
+  trump_tweets_corp,
+  control = list(tokenize = tokenizer)
+)
+
+tdm <- as.matrix(tdm)
+trump_tweets_cleaned_freq <- rowSums(tdm)
+
+
+# Create a uni-gram (1-word) word cloud
+pal <- RColorBrewer::brewer.pal(9,"Set2")
+wordcloud::wordcloud(names(trump_tweets_cleaned_freq), trump_tweets_cleaned_freq, min.freq=50,max.words = 50, random.order=TRUE,random.color = TRUE, rot.per=.15, colors = pal,scale = c(3,1))
+```
+
+# Conclusion
+
+Based on the $R^2$ value (3%-4%) between White House sentiments and stocks, there is little correlation and statistical signifance to the White House Briefings affecting the average closing price of small, mid, or large businesses in America. Ideally, we wanted to perform a sentiment analysis of Trump's tweets to visualize the impact of his words (unfiltered through tweets) on the economy, especially during the current crises. Unfortunately, twitter's API only allows for the download of a week's worth of data from the present date. 
+
+Something to consider, there many variables that affect stock or economic performance, which we did not take into consideration. In the future, perhaps a sentiment analysis of news articles from the financial times or wall street journal, as well as the social media accounts of prominent financial talking heads comparing it with White House  Briefings might see a better correlation to market performance. Also, the lexicon used for to compare against market performance is bing. We did not compare against others. 
+
+Sentence Sentiment Analysis can be considered here since it focuses on the whole sentence and not just words. It works well with the larger amount of data so can be explored here to get the sentiments that might go well with stocks.
+
++ Overall, the tweets convey an optimistic sentiment with the high frequency of words such as `Positive`,`safe` and `lead` of defeating Coronavirus. And most negative high frequancy words such as `lack`,`scam` and `concern`.
+
++ When looking at bar graph (Sentiment Word Frequency graph), the word “lack” has highest frequency among other words, which suggests that there are news or stories posted on twitter about people died in Covid-19 pandemic and president statement is not correct. 
+
++ The most frequent words in bi-gram word cloud plot show related to tested positive, approved trails, lung disinfectant, concern huge, and huge scam suggesting that the Government tried to release vaccine for the virus but the number of infection cases increase and people are more panic about their health. 
+
+This sentiment analysis, we see the most negative sentiments over positive. This pandemic number of infections of people increasing daily but no vaccine released yet. Government trying hard to help people, due to infection health care professionals also getting infected. 
+
+
+## Challenges & Additional Comments
+
+* Incorpating such different data into one graph for comparison 
+* Twitter data was only available for the past 8 days, so we were unable to chart this data over time
+* Our feature not discussed in our class was using linear regression to analyze different stock prices and sentiment analysis
+
+
+## Resources  
+  
+* [https://bradleyboehmke.github.io/2015/12/scraping-html-text.html](https://bradleyboehmke.github.io/2015/12/scraping-html-text.html)  
+* [https://projects.fivethirtyeight.com/trump-approval-ratings/](https://projects.fivethirtyeight.com/trump-approval-ratings/)
+* Twitter API using R: https://www.youtube.com/watch?v=M_PnapGrpNI
+* Twitter react to the Coronavirus pandemic: https://towardsdatascience.com/how-did-twitter-react-to-the-coronavirus-pandemic-2857592b449a
+
+
+
+
